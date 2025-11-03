@@ -1,0 +1,20 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+/* This imports Tailwind's styles */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* This is our base style */
+body {
+  font-family: 'Inter', sans-serif;
+  background-color: #0f172a; /* slate-900 */
+  color: #f1f5f9; /* slate-100 */
+}
+
+/* Custom styles for date/time inputs to look good on dark mode */
+input[type="date"]::-webkit-calendar-picker-indicator,
+input[type="time"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  filter: invert(0.8);
+}
