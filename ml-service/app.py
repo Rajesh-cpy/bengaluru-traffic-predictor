@@ -1,169 +1,160 @@
-# filename: ml_service/app.py
-import os
 from flask import Flask, request, jsonify
-import joblib
 import pandas as pd
+import joblib
 import numpy as np
+from datetime import datetime
 
 app = Flask(__name__)
 
-# --- Load Model ---
-MODEL_PATH = 'traffic_model.joblib'
-model = None
-feature_names_in_ = None # Store feature names expected by the model
-
+# ====================================================
+# Load Model and Preprocessors
+# ====================================================
 try:
-    # Load the pipeline object
-    pipeline = joblib.load(MODEL_PATH)
-    print(f"--- Pipeline '{MODEL_PATH}' loaded successfully. ---")
-
-    # Extract the final estimator (assuming it's the last step)
-    # Adjust this if your pipeline structure is different
-    if hasattr(pipeline, 'steps'):
-        model = pipeline.steps[-1][1]
-        # Get feature names expected *after* preprocessing
-        # This often involves accessing the fitted preprocessor step
-        preprocessor = pipeline.steps[0][1] # Assuming preprocessor is the first step
-        if hasattr(preprocessor, 'get_feature_names_out'):
-             # Handle potential variations in how feature names are stored/generated
-            try:
-                # Attempt to get feature names after transformation
-                # This might need adjustment based on your specific ColumnTransformer structure
-                cat_features = preprocessor.transformers_[0][1].get_feature_names_out()
-                num_features = preprocessor.transformers_[1][2] # Get original names of numeric features passed through
-                feature_names_in_ = np.concatenate([cat_features, num_features])
-            except Exception as e:
-                print(f"Warning: Could not automatically determine feature names from preprocessor: {e}")
-                feature_names_in_ = None # Fallback if names can't be extracted
-        else:
-             print("Warning: Preprocessor does not have 'get_feature_names_out'. Cannot verify feature names.")
-    else:
-        # If it's not a pipeline, assume the loaded object is the model directly
-        model = pipeline
-        print("Warning: Loaded object is not a Pipeline. Assuming it's a model.")
-        # We might not be able to easily get feature names here
-
-    if feature_names_in_ is not None:
-        print(f"--- Model expects {len(feature_names_in_)} features after preprocessing: {list(feature_names_in_)} ---")
-    else:
-        # Fallback to the known input columns before preprocessing if needed for validation
-        feature_names_in_ = [
-            'Traffic Volume', 'Average Speed', 'Congestion Level',
-            'Road Capacity Utilization', 'Incident Reports', 'Public Transport Usage',
-            'Parking Usage', 'Pedestrian and Cyclist Count', 'Weather Conditions',
-            'Roadwork and Construction Activity'
-        ]
-        print(f"--- Using predefined input features for validation: {feature_names_in_} ---")
-
-
-except FileNotFoundError:
-    print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    print(f"ERROR: Model file not found at '{os.path.abspath(MODEL_PATH)}'")
-    print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    model = None # Ensure model is None if loading fails
+    model = joblib.load("bengaluru_traffic_model.pkl")
+    encoders = joblib.load("label_encoders.pkl")
+    target_scaler = joblib.load("target_scaler.pkl")
+    print("✅ Model, encoders, and scaler loaded successfully.")
 except Exception as e:
-    print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    print(f"ERROR loading model/pipeline '{MODEL_PATH}': {e}")
-    print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    model = None # Ensure model is None if loading fails
+    print(f"❌ Error loading model or encoders: {e}")
 
-# --- Define the Raw Input Features expected from Node.js ---
-# These must match exactly what Node.js sends
-RAW_INPUT_FEATURES = [
-    'Traffic Volume',
-    'Average Speed',
-    'Congestion Level',
-    'Road Capacity Utilization',
-    'Incident Reports',
-    'Public Transport Usage',
-    'Parking Usage',
-    'Pedestrian and Cyclist Count',
-    'Weather Conditions',
-    'Roadwork and Construction Activity'
-]
+# ====================================================
+# Preprocessing Function (aligned with training)
+# ====================================================
+def preprocess_input(data):
+    df = pd.DataFrame([data])
 
+    # Convert Date → Extract features
+    if "Date" in df.columns:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df["Year"] = df["Date"].dt.year
+        df["Month"] = df["Date"].dt.month
+        df["Day"] = df["Date"].dt.day
+        df["DayOfWeek"] = df["Date"].dt.dayofweek
+        df.drop(columns=["Date"], inplace=True)
 
-@app.route('/health', methods=['GET'])
-def health():
-    """Health check endpoint."""
-    if model: # Check if the *model* specifically was loaded (might still fail if pipeline didn't contain model)
-        return jsonify({"status": "OK", "message": "ML service running, model loaded."}), 200
+    # Hour context (use backend hour)
+    if "Hour" in data and data["Hour"] is not None:
+        df["Hour"] = int(data["Hour"])
     else:
-        return jsonify({"status": "Error", "message": "ML service running, but model FAILED to load."}), 500
+        df["Hour"] = datetime.now().hour
 
-@app.route('/predict', methods=['POST'])
-def predict():
-    """Prediction endpoint - expects features, returns predicted Travel Time Index."""
-    print("\n--- Received prediction request ---")
-    if model is None: # Check the final estimator model
-        print("!!! Model object is None, cannot predict.")
-        return jsonify({"error": "Model could not be loaded or extracted from pipeline."}), 500
-
-    try:
-        data = request.get_json()
-        if not data:
-            print("!!! Received empty request data.")
-            return jsonify({"error": "No input data provided."}), 400
-
-        print("Received Features (raw):")
-        print(data)
-
-        # 1. Prepare data for the PIPLELINE - Create DataFrame with RAW features
-        feature_values = {}
-        missing_features = []
-        for feature in RAW_INPUT_FEATURES:
-            if feature in data:
-                 # Pass raw values, let the pipeline handle types/encoding
-                 # Ensure value is not None, replace with a sensible default if needed
-                 feature_values[feature] = [data[feature] if data[feature] is not None else 0] # Example: replace None with 0
-            else:
-                missing_features.append(feature)
-                print(f"ERROR: Feature '{feature}' is missing in the request data!")
-                return jsonify({"error": f"Missing required feature: {feature}"}), 400
-        
-        # Create DataFrame in the expected order for the *pipeline input*
-        try:
-             input_df = pd.DataFrame(feature_values)[RAW_INPUT_FEATURES] 
-             print("\nDataFrame sent to pipeline:")
-             print(input_df.to_string())
-        except Exception as e:
-            print(f"!!! Error creating DataFrame for pipeline: {e}")
-            return jsonify({"error": f"Error preparing data for prediction: {e}"}), 400
-
-
-        # 2. Make the prediction using the PIPELINE object
-        # The pipeline handles preprocessing (like OneHotEncoding) internally
-        print("\nAttempting prediction using the pipeline...")
-        prediction_result = pipeline.predict(input_df) # Use the loaded pipeline here
-        print(f"Raw model output (Index?): {prediction_result}") 
-
-        # 3. Extract the single prediction value (Travel Time Index)
-        if isinstance(prediction_result, (list, np.ndarray)) and len(prediction_result) > 0:
-            output_value = float(prediction_result[0])
-        elif isinstance(prediction_result, (int, float, np.number)):
-             output_value = float(prediction_result)
+    # Traffic Hour Weight (peak hour importance)
+    def hour_weight(h):
+        if 0 <= h < 5:
+            return 0.2
+        elif 7 <= h < 10 or 17 <= h < 20:
+            return 1.0
+        elif 10 <= h < 16:
+            return 0.6
         else:
-            print(f"!!! Unexpected model output format: {type(prediction_result)}, value: {prediction_result}")
-            raise ValueError("Model output was not in the expected numerical format.")
+            return 0.3
 
-        # Ensure the index is reasonable (e.g., non-negative)
-        if output_value < 0:
-            print(f"Warning: Predicted index {output_value} is negative. Clamping to 0.1 for calculation.")
-            output_value = 0.1 # Avoid division by zero issues later maybe? Or return as is? Adjust as needed.
-            
-        print(f"Predicted Travel Time Index: {output_value}")
-        
-        # 4. Return the predicted index
-        return jsonify({
-            "travel_time_index": output_value # Changed key
-        })
+    df["Traffic_Hour_Weight"] = df["Hour"].apply(hour_weight)
+
+    # Encode categorical
+    categorical_cols = [
+        "Area Name",
+        "Road/Intersection Name",
+        "Weather Conditions",
+        "Roadwork and Construction Activity",
+    ]
+    for col in categorical_cols:
+        if col in df.columns and col in encoders:
+            le = encoders[col]
+            df[col] = df[col].apply(lambda x: x if x in le.classes_ else le.classes_[0])
+            df[col] = le.transform(df[col])
+
+    # Feature Engineering (must match training)
+    df["Volume_to_Capacity"] = (data.get("Traffic Volume", 1) /
+                                (data.get("Road Capacity Utilization", 85) + 1)) * (1 + df["Traffic_Hour_Weight"])
+
+    df["Speed_Index"] = data.get("Travel Time Index", 1) * (1 + df["Traffic_Hour_Weight"])
+
+    df["Traffic_Intensity"] = (
+        (data.get("Traffic Volume", 10000) /
+         (data.get("Pedestrian and Cyclist Count", 100) + 1)) *
+        (1 + df["Traffic_Hour_Weight"])
+    )
+
+    df["Congestion_to_Capacity"] = (
+        data.get("Congestion Level", 50) /
+        (data.get("Road Capacity Utilization", 85) + 1) *
+        (0.5 + df["Traffic_Hour_Weight"])
+    )
+
+    # Keep only model training columns
+    training_features = model.feature_names_in_ if hasattr(model, "feature_names_in_") else df.columns
+    df = df.reindex(columns=training_features, fill_value=0)
+
+    return df
+
+# ====================================================
+# Prediction Endpoint
+# ====================================================
+@app.route("/predict", methods=["POST"])
+def predict():
+    try:
+        input_data = request.get_json()
+
+        # Weather values (optional)
+        weather = input_data.get("Weather", {})
+        input_data["Weather_Temp"] = weather.get("temp", 25)
+        input_data["Weather_Humidity"] = weather.get("humidity", 60)
+        input_data["Weather_Wind"] = weather.get("wind", 5)
+
+        # Use hour from Node backend
+        request_hour = int(input_data.get("Hour", datetime.now().hour))
+
+        # Time Context
+        if request_hour < 5:
+            time_label = "Low Congestion (Nighttime)"
+        elif 7 <= request_hour <= 10 or 17 <= request_hour <= 20:
+            time_label = "Heavy Congestion (Peak Hour)"
+        elif 10 <= request_hour <= 16:
+            time_label = "Moderate Flow (Daytime)"
+        else:
+            time_label = "Light Congestion (Evening)"
+
+        input_data["Time_Context"] = time_label
+
+        # PREPROCESS
+        processed_df = preprocess_input(input_data)
+
+        # Predict scaled outputs
+        prediction_scaled = model.predict(processed_df)
+        prediction = target_scaler.inverse_transform(prediction_scaled)
+
+        # Extract values
+        raw_volume = float(prediction[0][0])
+        avg_speed = float(prediction[0][1])
+        congestion = float(prediction[0][2])
+
+        # ====================================================
+        # REALISTIC VEHICLES-PER-HOUR SCALING (NEW!)
+        # ====================================================
+        scaled_volume = raw_volume * (congestion / 100)
+
+        # Clamp to realistic Bengaluru highway/local road ranges
+        scaled_volume = max(300, min(scaled_volume, 18000))
+
+        result = {
+            "Traffic Volume": round(scaled_volume, 2),  # vehicles per hour (REALISTIC)
+            "Average Speed": round(avg_speed, 2),
+            "Congestion Level": round(congestion, 2),
+            "Time Context": time_label,
+            "Hour Evaluated": request_hour,
+        }
+
+        print("🚦 Predicted:", result)
+        return jsonify(result)
 
     except Exception as e:
-        print(f"!!! EXCEPTION during prediction: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc() 
-        return jsonify({"error": f"An error occurred during prediction processing: {str(e)}"}), 500
+        print("❌ Error during prediction:", e)
+        return jsonify({"error": str(e)})
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+# ====================================================
+# Run Flask Server
+# ====================================================
+if __name__ == "__main__":
+    print("🚀 Starting Bengaluru Traffic Prediction ML Service...")
+    app.run(host="0.0.0.0", port=5000)

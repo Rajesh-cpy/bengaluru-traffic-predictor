@@ -1,0 +1,9 @@
+POST http://localhost:8080/api/predict
+Content-Type: application/json
+
+{
+  "from": "Whitefield",
+  "to": "Marathahalli",
+  "date": "2025-05-20",
+  "time": "18:00"
+}

@@ -1,0 +1,22 @@
+export const bengaluruAreas = [
+  "Koramangala",
+  "BTM Layout",
+  "HSR Layout",
+  "Marathahalli",
+  "Whitefield",
+  "Electronic City",
+  "Indiranagar",
+  "MG Road",
+  "JP Nagar",
+  "Rajajinagar",
+  "Jayanagar",
+  "Hebbal",
+  "Banashankari",
+  "Ulsoor",
+  "Bellandur",
+  "Majestic",
+  "Kengeri",
+  "Yelahanka",
+  "Basavanagudi",
+  "Richmond Town"
+];
